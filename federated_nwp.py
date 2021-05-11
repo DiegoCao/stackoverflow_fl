@@ -71,9 +71,28 @@ from tqdm import tqdm
 
 import numpy as np
 import matplotlib.pyplot as plt
+import gc
+# import objgraph
 
+gc.enable()
+print('gc is enabled? ', gc.isenabled())
+
+# import guppy as guppy
 import tensorflow as tf
 import tensorflow_federated as tff
+
+physical_devices = tf.config.list_physical_devices('GPU')
+tf.config.experimental.set_memory_growth(physical_devices[0], enable=True)
+
+import logging
+import pickle
+
+
+import utils
+from utils import logger
+
+
+
 
 from src import (dataset, metrics, embeddings, model, validation,
     federated, generate_text, transfer_learning)
@@ -81,6 +100,9 @@ from src import (dataset, metrics, embeddings, model, validation,
 # Load Parameters
 with open("params.json", "r") as read_file:
     params = json.load(read_file)
+
+sys.stdout = logger.Logger()
+
 
 # Set Parameters
 VOCAB_SIZE = params['VOCAB_SIZE']
@@ -99,8 +121,11 @@ EMBEDDING_DIM = params['EMBEDDING_DIM']
 RNN_UNITS = params['RNN_UNITS']
 EMBEDDING_LAYER = params['EMBEDDING_LAYER']
 
-# Set Save Path
-sav = 'experiment_runs/{}_{}_{}_{}_{}/'.format(
+LOAD_FROM_PREVIOUS = params['LOAD_FROM_PREVIOUS']
+
+# Set Save Pat
+
+sav = 'chrtest/infomap_random1/{}_{}_{}_{}_{}/'.format(
     NUM_PRETRAINING_ROUNDS,
     EMBEDDING_LAYER,
     EMBEDDING_DIM,
@@ -115,6 +140,17 @@ extended_vocab_size = VOCAB_SIZE + len(
 if not os.path.exists(sav):
     os.makedirs(sav)
 
+
+ranked_client_list = pickle.load(open('list.txt', 'rb'))
+
+commu = federated.getCommu(file = './cluster/infomap_com.json')
+train_clients = federated.get_clients_from_communities(NUM_TRAIN_CLIENTS, commu)
+
+
+# train_datasets = [train_data.create_tf_dataset_for_client(client) for client in train_clients]
+# train_clients = federated.get_ranked_clients(NUM_TRAIN_CLIENTS, 0, ranked_client_list)
+print('-----------get train clients test done------------')
+
 # Load and Preprocess Word Level Datasets
 train_data, val_data, test_data = dataset.construct_word_level_datasets(
     vocab_size=VOCAB_SIZE,
@@ -127,10 +163,15 @@ train_data, val_data, test_data = dataset.construct_word_level_datasets(
     num_validation_examples=NUM_VALIDATION_EXAMPLES,
     num_test_examples=NUM_TEST_EXAMPLES)
 
+# np.save('train.npy', train_data)
+# np.save('validate.npy', val_data)
+# np.save('test_data.npy', test_data)
 # Retrieve the Fine Tunining Dataset Vocab
 vocab = dataset.get_vocab(vocab_size=VOCAB_SIZE)
 
 # Pretrain with a Different Text Corpus by First Reading in the Text Data
+
+
 if NUM_PRETRAINING_ROUNDS > 0:
 
     # Load and preprocess the shakespeare dataset
@@ -169,6 +210,7 @@ embedding_matrix = embeddings.build_embedding_layer(
 # - TFF uses a sample batch to know the types and shapes the model expects.
 # - The model function builds and compiles the model
 #   and creates a TFF version to be trained.
+
 sample_batch = tf.nest.map_structure(lambda x: x.numpy(), next(iter(val_data)))
 
 # Initialize Train and Validation Model Trackers to be Used Below
@@ -185,6 +227,7 @@ train_metrics_tracker = validation.model_history_tracker(
     metric_names=evaluation_metric_names)
 val_metrics_tracker = validation.model_history_tracker(
     metric_names=evaluation_metric_names)
+
 
 # Create an Iterative Process
 iterative_process = (
@@ -208,9 +251,27 @@ else:
 
 # Train Model Across Many Randomly Sampled Clients with Federated Averaging
 start_time = time.time()
+
+# if LOAD_FROM_PREVIOUS > 0:
+#     server_state = 
+# train_clients = federated.get_sample_clients(
+#         dataset=train_data, num_clients=NUM_TRAIN_CLIENTS)
+
+#     # train_clients = federated.get_ranked_clients(NUM_TRAIN_CLIENTS, round_num, ranked_client_list)
+    
+# train_datasets = [train_data.create_tf_dataset_for_client(
+#         client) for client in train_clients]
+
+commu = federated.getCommu(file = './cluster/infomap_com.json')
+
 for round_num in tqdm(range(0, NUM_ROUNDS)):
 
-    # Examine validation metrics
+    # print("=========================================")
+    # gc.collect()
+    # print("-------------------")
+    # objgraph.show_growth()
+    # print("=========================================")
+    # # Examine validation metrics
     print('Evaluating before round #{} on {} examples.'.format(
         round_num, NUM_VALIDATION_EXAMPLES))
     validation.keras_evaluate(state=server_state,
@@ -223,14 +284,23 @@ for round_num in tqdm(range(0, NUM_ROUNDS)):
                               metrics_tracker=val_metrics_tracker,
                               checkpoint_dir=sav)
 
+
+
     # Sample train clients to create a train dataset
     print('\nSampling {} new clients.'.format(NUM_TRAIN_CLIENTS))
-    train_clients = federated.get_sample_clients(
-        dataset=train_data, num_clients=NUM_TRAIN_CLIENTS)
-    train_datasets = [train_data.create_tf_dataset_for_client(
-        client) for client in train_clients]
+    
+    
+    
+    # train_clients = federated.get_sample_clients(
+    #     dataset=train_data, num_clients=NUM_TRAIN_CLIENTS)
 
-    # Apply federated training round
+    # train_clients = federated.get_ranked_clients(NUM_TRAIN_CLIENTS, round_num, ranked_client_list)
+    train_clients = federated.get_clients_from_communities(NUM_TRAIN_CLIENTS, commu)
+
+
+    train_datasets = [train_data.create_tf_dataset_for_client(client) for client in train_clients]
+
+    # Apply federated training roundh=
     server_state, server_metrics = iterative_process.next(
         server_state, train_datasets)
 
@@ -294,8 +364,11 @@ def mean_err(arr):
     return 1.96 * np.std(arr)/np.sqrt(len(arr))
 
 # Compute Train Sample Means and 95% Confidence Interval Errors
+
 train_sample_stats = ['Examples', 'Tokens', 'Tokens No OOV']
+
 means = [np.mean(examples), np.mean(tokens), np.mean(tokens_no_oov)]
+
 errors = [mean_err(examples), mean_err(tokens), mean_err(tokens_no_oov)]
 
 # Plot Train Sample Means
